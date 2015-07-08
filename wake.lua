@@ -47,8 +47,8 @@ radio = make_macs {
 }
 
 -- Ping these no matter what the leases file says
-ping_hosts = { 'lowrider', 'onion', 'radish', 'turnip', 'pianobar',
-	      'chunga', 'frog', 'puffin', 'wombat', 'roadie' }
+ping_hosts = { lowrider=1 , onion=1, radish=1, turnip=1, pianobar=1,
+	      chunga=1, frog=1, puffin=1, wombat=1, roadie=1 }
 
 -- We can wake machines by class
 class = {
@@ -67,6 +67,7 @@ class = {
 function wake(ethers)
    local names = {}
    for _, ether in ipairs(ethers) do table.insert(names, ether.name) end
+   table.sort(names)
    io.write('Waking: '..table.concat(names, ', ')..'\n')
    local count=1
    local wakelan_cmd = { '/bin/wakelan', '-b', '172.20.0.255', '-m' }
@@ -89,29 +90,39 @@ function wake(ethers)
    io.write 'DONE!\n'
 end
 
-function resolve_ethers(names)
+function resolve_classes(names)
    local seen = {}
-   local ethers = {}
+   local result = {}
    function resolve(name_list)
       for _, name in ipairs(name_list) do
 	 if not seen[name] then
-	    if ether[name] then
-	       table.insert(ethers, ether[name])
-	    elseif class[name] then
+	    seen[name] = true
+	    if class[name] then
 	       resolve(class[name])
 	    else
-	       io.write('Unknown machine: '..name..'\n')
-	       os.exit(1)
+	       result[name]=true
 	    end
-	    seen[name] = true
 	 end
       end
    end
    resolve(names)
+   return result
+end
+
+function resolve_ethers(names)
+   local ethers = {}
+   for name, _ in pairs(resolve_classes(names)) do
+      if ether[name] then
+	 table.insert(ethers, ether[name])
+      else
+	 io.write('Unknown machine: '..name..'\n')
+	 os.exit(1)
+      end
+   end
    return ethers
 end
 
-function report_awake()
+function report_awake(filter)
    local leases = {}
    local lease_file = io.open('/var/state/dnsmasq/dnsmasq.leases', 'r')
    for lease in lease_file:lines() do
@@ -127,10 +138,19 @@ function report_awake()
       local job = spawn.spawn("/bin/ping", ping_cmd, true)
       if job < 0 then error "Can't spawn" end
       ping_jobs[job] = { host=host, is_lease=is_lease }
-      return job
    end
-   for _, host in ipairs(ping_hosts) do job = ping_it(host, false) end
-   for ipaddr,v in pairs(leases) do job = ping_it(ipaddr, true) end
+   if not filter then
+      for host, _ in pairs(ping_hosts) do ping_it(host, false) end
+      for ipaddr,v in pairs(leases) do ping_it(ipaddr, true) end
+   else
+      for name, _ in pairs(filter) do
+	 if not ping_hosts[name] then
+	    io.write('Unknown machine: '..name..'\n')
+	    os.exit(1)
+	 end
+      end
+      for host, _ in pairs(filter) do ping_it(host, false) end
+   end
    local anons, named = {}, {}
    local job, reason, value = spawn.wait()
    while job do
@@ -142,7 +162,8 @@ function report_awake()
 	       table.insert(anons, { name=mac_to_name[lease.mac] or lease.mac,
 				     ip=host } )
 	    else
-	       named[lease.name] = mac_to_name[lease.mac]
+	       named[lease.name] = mac_to_name[lease.mac] or
+		  lease.mac..' @ '..host
 	    end
 	 elseif not named[host] then named[host] = false
 	 end
@@ -155,6 +176,16 @@ function report_awake()
    end
    for _,host in ipairs(anons) do
       io.write('  '..host.name..' @ '..host.ip..'\n')
+   end
+end
+
+function show_candidates()
+   for name,_ in pairs(ether) do
+      print(name)
+   end
+   print "----"
+   for name,_ in pairs(class) do
+      print(name)
    end
 end
 
@@ -172,7 +203,15 @@ function split(str)
 end
 
 if #arg > 0 then
-   wake(resolve_ethers(arg[1] == '-c' and split(arg[2]) or arg))
+   local requests=arg[1] == '-c' and split(arg[2]) or arg
+   if requests[1] == '//' then
+      show_candidates()
+   elseif requests[1] == '/' then
+      table.remove(requests,1)
+      report_awake(#requests > 0 and resolve_classes(requests))
+   else
+      wake(resolve_ethers(requests))
+   end
 else
    report_awake()
 end
