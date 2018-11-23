@@ -1,5 +1,5 @@
-#!/bin/lua
-spawn = package.loadlib('/lib/spawn.so','luaopen_spawn')()
+#!/usr/local/bin/luajit
+spawn = require 'spawn'
 
 spawn.ignore_signals()
 
@@ -25,14 +25,12 @@ end
 -- Wired macs for hosts
 ether=make_macs {
    { 'chunga',    '00:22:15:8c:bd:ac',  20 },
-   { 'frog',      '00:16:d4:8f:f9:3f',  20 },
    { 'wombat',    '00:26:9e:5e:11:23',  20 },
-   { 'lowrider',  '1c:af:f7:6b:ff:07',  20 },
-   { 'onion',     '00:30:1b:48:c2:db',  20 },
-   { 'radish',    '80:ee:73:13:ba:23',  20 },
+   { 'lowrider',  '80:ee:73:13:ba:23',  20 },
+   { 'onion',     '90:b1:1c:75:74:fb',  20 },
+   { 'radish',    '90:b1:1c:87:4f:07',  20 },
    { 'puffin',    '88:ae:1d:51:62:69',  20 },
-   { 'turnip',    '00:18:f3:99:34:1b',  20 },
-   { 'pianobar',  '70:54:d2:18:7d:b3',  20 }
+   { 'parsnip',   '70:54:d2:18:7d:b3',  20 },
 }
 
 -- WIFI macs for hosts and dongles
@@ -40,46 +38,44 @@ radio = make_macs {
    { 'edimax1',   '00:1f:1f:01:f3:86' },
    { 'edimax2',   '00:1f:1f:01:f1:5c' },
    { 'chunga',    '00:15:af:ef:79:a4' },
-   { 'frog',      '00:16:e3:c7:e0:71' },
    { 'wombat',    '00:1e:65:91:79:4a' },
-   { 'lowrider',  '00:16:44:18:c8:de' },
-   { 'puffin',    '70:f1:a1:f9:00:c6' }
+   { 'puffin',    '70:f1:a1:f9:00:c6' },
+   { 'squirt',    'b8:27:eb:ca:b9:86' },
+   { 'chopper',   'b8:27:eb:35:8e:0b' }
 }
 
 -- Ping these no matter what the leases file says
-ping_hosts = { lowrider=1 , onion=1, radish=1, turnip=1, pianobar=1,
-	      chunga=1, frog=1, puffin=1, wombat=1, roadie=1 }
+ping_hosts = { lowrider=1 , onion=1, radish=1, parsnip=1,
+	      chunga=1, puffin=1, wombat=1, squirt=1, chopper=1,
+	      --[[ roadie=1 --]] }
 
 -- We can wake machines by class
 class = {
-   desktops = { 'shuttles', 'turnip', 'lowrider', 'pianobar' },
-   bits32 = { 'frog', 'chunga' },
-   bits64 = { 'desktops', 'puffin', 'wombat' },
-   shuttles = { 'onion', 'radish' },
-   laptops = { 'wombat', 'puffin', 'frog' },
-   netbooks = { 'chunga' },
-   amd = { 'puffin', 'lowrider' },
-   intel = { 'onion', 'radish', 'turnip', 'wombat', 'frog', 'chunga',
-	     'pianobar' },
-   all = { 'intel', 'amd' }
+   rpi = { 'squirt', 'chopper' },
+   bits32 = { 'chunga' },
+   bits64 = { 'parsnip', 'radish', 'onion', 'puffin', 'wombat',
+              'lowrider' },
+   music = { 'parsnip', 'radish', 'onion', 'puffin', 'wombat' },
+   all = { 'bits64', 'bits32' }
 }
 
 function wake(ethers)
    local names = {}
    for _, ether in ipairs(ethers) do table.insert(names, ether.name) end
    table.sort(names)
-   io.write('Waking: '..table.concat(names, ', ')..'\n')
+   io.write('Waking: ',table.concat(names, ', '),'\n')
    local count=1
-   local wakelan_cmd = { '/bin/wakelan', '-b', '172.20.0.255', '-m' }
+   local wakelan_cmd = { '/usr/local/libexec/wakelan',
+			 '-b', '172.20.0.255', '-m' }
    for time = 0,times - 1 do
       if time % display_every == 0 then
-	 io.write((''..count)..'...')
+	 io.write(count,'...')
 	 count = count + 1
       end
       for _, victim in ipairs(ethers) do
 	 if time % victim.when == 0 then
 	    wakelan_cmd[5] = victim.mac
-	    spawn.spawn('/bin/wakelan', wakelan_cmd)
+	    spawn.spawn('/usr/local/libexec/wakelan', wakelan_cmd)
 	    spawn.wait()
 	 end
       end
@@ -115,7 +111,7 @@ function resolve_ethers(names)
       if ether[name] then
 	 table.insert(ethers, ether[name])
       else
-	 io.write('Unknown machine: '..name..'\n')
+	 io.write('Unknown machine: ',name,'\n')
 	 os.exit(1)
       end
    end
@@ -145,7 +141,7 @@ function report_awake(filter)
    else
       for name, _ in pairs(filter) do
 	 if not ping_hosts[name] then
-	    io.write('Unknown machine: '..name..'\n')
+	    io.write('Unknown machine: ',name,'\n')
 	    os.exit(1)
 	 end
       end
@@ -171,11 +167,11 @@ function report_awake(filter)
       job, reason, value = spawn.wait()
    end
    for host,real in pairs(named) do
-      io.write('  '..host..
-		  (real and (real ~= host) and ' ('..real..')' or '')..'\n')
+      io.write('  ',host,
+		  (real and (real ~= host) and ' ('..real..')' or ''),'\n')
    end
    for _,host in ipairs(anons) do
-      io.write('  '..host.name..' @ '..host.ip..'\n')
+      io.write('  ',host.name,' @ ',host.ip,'\n')
    end
 end
 
