@@ -1,0 +1,335 @@
+#!/usr/local/bin/luajit
+
+-- Wired macs for hosts
+ether = {
+   { 'wombat',    '00:26:9e:5e:11:23',  20 },
+   { 'lowrider',  '80:ee:73:13:ba:23',  20 },
+   { 'onion',     '5c:f9:dd:75:9e:0d',  20 },
+   { 'radish',    '90:b1:1c:87:4f:07',  20 },
+   { 'puffin',    '88:ae:1d:51:62:69',  20 },
+   { 'parsnip',   '70:54:d2:18:7d:b3',  20 },
+   { 'retread',   '00:1a:a0:68:fa:22',  20 },
+   { 'wormy',     '38:c9:86:5a:a9:bf',  20 },
+   { 'barnacle',  'a0:b3:cc:7d:e2:c8',  20 },
+   { 'lunchbox',  '00:25:64:9f:a3:e4',  20 },
+   { 'toaster',   'd4:be:d9:c1:10:d3',  20 },
+   { 'fluffy',    '00:30:1b:48:c2:db',  20 },
+   { 'chunga',    '00:22:15:8c:bd:ac',  20 },
+   { 'squirt',    'b8:27:eb:9f:ec:d3',  20 },
+   { 'frobnitz',  'b8:27:eb:c1:be:49',  20 },
+   { 'bagel',     'b8:27:eb:12:ec:8f',  20 },
+}
+
+-- WIFI macs for hosts and dongles
+radio = {
+   { 'edimax1',   '00:1f:1f:01:f3:86' },
+   { 'edimax2',   '00:1f:1f:01:f1:5c' },
+   { 'chunga',    '00:15:af:ef:79:a4' },
+   { 'wombat',    '00:1e:65:91:79:4a' },
+   { 'puffin',    '70:f1:a1:f9:00:c6' },
+   { 'squirt',    'b8:27:eb:ca:b9:86' },
+   { 'frobnitz',  'b8:27:eb:94:eb:1c' },
+   { 'barnacle',  '20:10:7a:74:ce:88' },
+}
+
+-- We can wake machines by class
+class = {
+   raspi = { 'squirt', 'frobnitz', 'bagel' },
+   bits32 = { 'chunga' },
+   bits64 = { 'parsnip', 'radish', 'onion', 'puffin', 'wombat', 'retread',
+	      'lowrider', 'barnacle', 'lunchbox', 'toaster', 'fluffy' },
+   gig = { 'parsnip', 'radish', 'onion', 'wombat', 'retread',
+	      'lowrider', 'lunchbox', 'toaster', 'fluffy' },
+   apple = { 'wormy' },
+   all = { 'bits64', 'bits32', 'apple', 'raspi' }
+}
+
+-- Ping these no matter what the leases file says
+ping_hosts = { lowrider=1 , onion=1, radish=1, parsnip=1, retread=1,
+	      puffin=1, wombat=1, squirt=1, frobnitz=1, wormy=1, barnacle=1,
+	      lunchbox=1, toaster=1, chunga=1, fluffy=1, bagel=1,
+	      --[[ roadie=1 --]] }
+
+-- Stuff that shouldn't appear
+no_show = {
+  ['28:c6:8e:f4:85:97'] = true,
+  ['b8:27:eb:84:29:82'] = true,
+}
+
+
+ffi = require 'ffi'
+ffi.cdef [[
+    int waitpid(int, int *, int);
+    int close(int);
+    int fork();
+    int execvp(const char *, const char *[]);
+    void *signal(int, void *);
+    int dup2(int, int);
+    int setpgid(int, int);
+    int pipe2(int [], int);
+    int fileno(void *);
+    int usleep(int);
+    int kill(int, int);
+    void perror(const char*);
+]]
+
+-- ignore sighup, sigint, sigquit, and sigtstp
+ignore = ffi.cast('void *', 1)
+ffi.C.signal(1, ignore)
+ffi.C.signal(2, ignore)
+ffi.C.signal(3, ignore)
+ffi.C.signal(20, ignore)
+
+-- Similar to popen for reading, but sets process group.
+function open_pipe(cmd, direction)
+   direction = direction or 'r'
+   local pipe = ffi.new 'int[2]'
+   ffi.C.pipe2(pipe, 16384) -- O_DIRECT
+   local pid = ffi.C.fork()
+   local is_write = direction == 'w'
+   assert(pid ~= -1, 'Fork failed')
+   if pid ~= 0 then
+      local wrapper
+      ffi.C.close(pipe[is_write and 0 or 1])
+      if pid > 0 then
+	 local dummy_end = io.open('/dev/null', direction)
+	 ffi.C.dup2(pipe[is_write and 1 or 0], ffi.C.fileno(dummy_end))
+	 local gc_proxy = newproxy(true)
+	 wrapper = setmetatable({}, {
+	       __tostring = function() return tostring(dummy_end) end,
+	       __index = function(_, fn)
+		  return function(_, ...)
+		     return dummy_end[fn](dummy_end, ...) end end,
+	       __proxy = gc_proxy
+	 })
+	 local open = true
+	 function wrapper.close()
+	    -- socat hangs on EOF otherwise.
+	    if cmd:match '^socat' then ffi.C.kill(pid, 9) end
+	    dummy_end:close()
+	    open = nil
+	    wait(false, pid)
+	    return
+	 end
+	 getmetatable(gc_proxy).__gc =
+	    function() if open then wrapper.close() end end
+      end
+      ffi.C.close(pipe[is_write and 1 or 0])
+      return wrapper, pid
+   end
+   if is_write then
+      ffi.C.close(pipe[1])
+      ffi.C.dup2(pipe[0], 0)
+      ffi.C.close(pipe[0])
+   else
+      ffi.C.close(pipe[0])
+      ffi.C.dup2(pipe[1], 1)
+      ffi.C.close(pipe[1])
+   end
+   ffi.C.setpgid(0, 0)
+   ffi.C.execvp('/bin/sh', ffi.new('const char *[4]', { 'sh', '-c', cmd } ))
+   os.exit(1)
+end
+
+function wait(nohang, pid)
+   local status = ffi.new 'unsigned int [1]'
+   local process = ffi.C.waitpid(pid or -1, status, nohang and 1 or 0)
+   if process < 0 then return end
+   local sigstate = status[0] % 128
+   if  sigstate > 0 then
+      return process, 'signal', sigstate
+   else
+      return process, 'exit', status[0]/256 % 256
+   end
+end
+
+-- Times through outer loop
+times = 100
+-- Delay between iterations (microseconds)
+delay = 10000
+-- Display counter every so many iterations
+display_every = 10
+
+mac_to_name = {}
+
+function make_macs(mac_list)
+   local t = {}
+   for _,defn in ipairs(mac_list) do
+      local name, mac, when = unpack(defn)
+      t[name] = { name=name, mac=mac, when=when or times}
+      mac_to_name[mac]=name
+   end
+   return t;
+end
+
+ether = make_macs(ether)
+radio = make_macs(radio)
+
+function wake(ethers)
+   local function mac_to_string(mac)
+      local bytes = { mac:match '(.*):(.*):(.*):(.*):(.*):(.*)'}
+      for i=1,6 do bytes[i] = tonumber('0x'..bytes[i]) end
+      return string.char(unpack(bytes))
+   end
+   local names = {}
+   local head = mac_to_string 'ff:ff:ff:ff:ff:ff'
+   for _, ether in ipairs(ethers) do table.insert(names, ether.name) end
+   table.sort(names)
+   io.write('Waking: ',table.concat(names, ', '),'\n')
+   local count=1
+   waker = open_pipe('socat - udp-sendto:172.20.0.255:32415,broadcast', 'w')
+   for i = 1, #ethers do ethers[i].mac = mac_to_string(ethers[i].mac) end
+   for time = 0,times - 1 do
+      if time % display_every == 0 then
+	 io.write(count,'...')
+	 io.flush()
+	 count = count + 1
+      end
+      for _, victim in ipairs(ethers) do
+	 if time % victim.when == 0 then
+	    for i=1,6 do waker:write(head) end
+	    for i=1,16 do waker:write(victim.mac) end
+	    waker:flush()
+	 end
+      end
+      ffi.C.usleep(delay)
+      io.write '\r'
+      io.flush()
+   end
+   waker:close()
+   io.write 'DONE!\n'
+end
+
+function resolve_classes(names)
+   local seen = {}
+   local result = {}
+   function resolve(name_list)
+      for _, name in ipairs(name_list) do
+	 if not seen[name] then
+	    seen[name] = true
+	    if class[name] then
+	       resolve(class[name])
+	    else
+	       result[name]=true
+	    end
+	 end
+      end
+   end
+   resolve(names)
+   return result
+end
+
+function resolve_ethers(names)
+   local ethers = {}
+   for name, _ in pairs(resolve_classes(names)) do
+      if ether[name] then
+	 table.insert(ethers, ether[name])
+      else
+	 io.write('Unknown machine: ',name,'\n')
+	 os.exit(1)
+      end
+   end
+   return ethers
+end
+
+function report_awake(filter)
+   local leases = {}
+   local lease_file = io.open('/var/state/dnsmasq/dnsmasq.leases', 'r')
+   for lease in lease_file:lines() do
+      ether,ipaddr,name = lease:match "^.* (.*) (.*) (.*) .*"
+      if not no_show[ether] then
+         leases[ipaddr] = { mac=ether, ipaddr=ipaddr, name = name }
+      end
+   end
+   lease_file:close()
+   io.write 'Hosts up:\n'
+   local command = { 'mping -c 4 -t 2' }
+   host_is_lease = {}
+   if not filter then
+      for host in pairs(ping_hosts) do table.insert(command, host) end
+      for ipaddr in pairs(leases) do
+	 table.insert(command, ipaddr)
+	 host_is_lease[ipaddr] = true
+      end
+   else
+      for host, _ in pairs(filter) do
+	 if not ping_hosts[host] then
+	    io.write('Unknown machine: ', host, '\n')
+	    os.exit(1)
+	 end
+	 table.insert(command, host)
+      end
+   end
+   local mping = open_pipe(table.concat(command, ' '))
+   local anons, named = {}, {}
+   for host in mping:lines() do
+      if host_is_lease[host] then
+	 local lease = leases[host]
+	 if lease.name == '*' then
+	    table.insert(anons, { name=mac_to_name[lease.mac] or lease.mac,
+				  ip=host } )
+	 else
+	    named[lease.name] = mac_to_name[lease.mac] or
+	       lease.mac..' @ '..host
+	 end
+      elseif not named[host] then
+	 named[host] = false
+      end
+   end
+   for host,real in pairs(named) do
+      io.write('  ',host,
+		  (real and (real ~= host) and ' ('..real..')' or ''),'\n')
+   end
+   for _,host in ipairs(anons) do
+      io.write('  ',host.name,' @ ',host.ip,'\n')
+   end
+   mping:close()
+end
+
+function show_candidates(names)
+   if names[1] then
+      for name in pairs(resolve_classes(names)) do
+	 if ether[name] then print(name) end
+      end
+      return
+   end
+   for name,_ in pairs(ether) do
+      print(name)
+   end
+   print "----"
+   for name,_ in pairs(class) do
+      print(name)
+   end
+end
+
+function split(str)
+   local lst = {}
+   local function split_aux(str)
+      local token,rest = str:match '^%s*([^%s]+)(.*)$'
+      if token then
+	 table.insert(lst, token)
+	 split_aux(rest)
+      end
+   end
+   split_aux(str)
+   return lst
+end
+
+if #arg > 0 then
+   local requests=arg[1] == '-c' and split(arg[2]) or arg
+   if requests[1] == '//' then
+      table.remove(requests,1)
+      show_candidates(requests)
+   elseif requests[1] == '/' then
+      table.remove(requests,1)
+      report_awake(#requests > 0 and resolve_classes(requests))
+   else
+      wake(resolve_ethers(requests))
+   end
+else
+   report_awake()
+end
+
+-- Local Variables:
+-- mode: lua
+-- End:
