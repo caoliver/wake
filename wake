@@ -54,6 +54,7 @@ ping_hosts = { lowrider=1 , onion=1, radish=1, parsnip=1, retread=1,
 no_show = {
   ['28:c6:8e:f4:85:97'] = true,
   ['b8:27:eb:84:29:82'] = true,
+  ['00:05:cd:5a:54:14'] = true,
 }
 
 
@@ -317,14 +318,20 @@ end
 
 if #arg > 0 then
    local requests=arg[1] == '-c' and split(arg[2]) or arg
-   if requests[1] == '//' then
-      table.remove(requests,1)
-      show_candidates(requests)
-   elseif requests[1] == '/' then
-      table.remove(requests,1)
-      report_awake(#requests > 0 and resolve_classes(requests))
-   else
+   local slashes, rest = requests[1]:match '^(/*)(.*)$'
+   if slashes == '' then
       wake(resolve_ethers(requests))
+   else
+      if #rest > 0 then
+	 requests[1] = rest
+      else
+	 table.remove(requests,1)
+      end
+      if slashes == '/' then
+	 report_awake(#requests > 0 and resolve_classes(requests))
+      else
+	 show_candidates(requests)
+      end
    end
 else
    report_awake()
